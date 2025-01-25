@@ -6,14 +6,13 @@ A Model Context Protocol (MCP) server that implements RAT's two-stage reasoning 
 
 - **Two-Stage Processing**:
   - Uses DeepSeek for detailed reasoning and analysis
-  - Supports multiple models for final response generation (GPT-4, Claude, Mistral)
+  - Supports multiple models for final response generation
   - Maintains conversation context between interactions
 
 - **Supported Models**:
   - DeepSeek Reasoner (for thinking process)
-  - GPT-4 (via OpenRouter)
   - Claude 3.5 Sonnet (via Anthropic)
-  - Mistral (via OpenRouter)
+  - Any OpenRouter model (GPT-4, Gemini, etc.)
 
 - **Context Management**:
   - Maintains conversation history
@@ -25,7 +24,7 @@ A Model Context Protocol (MCP) server that implements RAT's two-stage reasoning 
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/rat-mcp-server.git
+git clone https://github.com/newideas99/RAT-retrieval-augmented-thinking-MCP.git
 cd rat-mcp-server
 ```
 
@@ -34,11 +33,20 @@ cd rat-mcp-server
 npm install
 ```
 
-3. Create a `.env` file with your API keys:
+3. Create a `.env` file with your API keys and model configuration:
 ```env
+# Required: DeepSeek API key for reasoning stage
 DEEPSEEK_API_KEY=your_deepseek_api_key_here
+
+# Required: OpenRouter API key for non-Claude models
 OPENROUTER_API_KEY=your_openrouter_api_key_here
-ANTHROPIC_API_KEY=your_anthropic_api_key_here  # Optional, for Claude model
+
+# Optional: Anthropic API key for Claude model
+ANTHROPIC_API_KEY=your_anthropic_api_key_here
+
+# Optional: Model configuration
+DEFAULT_MODEL=claude-3-5-sonnet-20241022  # or any OpenRouter model ID
+OPENROUTER_MODEL=openai/gpt-4  # default OpenRouter model if not using Claude
 ```
 
 4. Build the server:
@@ -59,7 +67,9 @@ Add to your Cline MCP settings (usually in `~/.vscode/globalStorage/saoudrizwan.
       "env": {
         "DEEPSEEK_API_KEY": "your_key_here",
         "OPENROUTER_API_KEY": "your_key_here",
-        "ANTHROPIC_API_KEY": "your_key_here"
+        "ANTHROPIC_API_KEY": "your_key_here",
+        "DEFAULT_MODEL": "claude-3-5-sonnet-20241022",
+        "OPENROUTER_MODEL": "openai/gpt-4"
       },
       "disabled": false,
       "autoApprove": []
@@ -75,7 +85,6 @@ The server provides a single tool `generate_response` with the following paramet
 ```typescript
 {
   "prompt": string,           // Required: The question or prompt
-  "model"?: string,          // Optional: "gpt-4" | "claude-3-5-sonnet-20241022" | "mistral"
   "showReasoning"?: boolean, // Optional: Show DeepSeek's reasoning process
   "clearContext"?: boolean   // Optional: Clear conversation history
 }
@@ -88,7 +97,6 @@ use_mcp_tool({
   tool_name: "generate_response",
   arguments: {
     prompt: "What is Python?",
-    model: "claude-3-5-sonnet-20241022",
     showReasoning: true
   }
 });

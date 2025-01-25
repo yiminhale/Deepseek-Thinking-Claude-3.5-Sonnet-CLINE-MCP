@@ -24,6 +24,8 @@ const log = (...args: any[]) => {
 
 // Constants
 const DEEPSEEK_MODEL = "deepseek-reasoner";
+const DEFAULT_MODEL = process.env.DEFAULT_MODEL || "claude-3-5-sonnet-20241022";
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "openai/gpt-4";
 
 interface ConversationEntry {
   timestamp: number;
@@ -40,7 +42,6 @@ interface ConversationContext {
 
 interface GenerateResponseArgs {
   prompt: string;
-  model?: string;
   showReasoning?: boolean;
   clearContext?: boolean;
 }
@@ -49,7 +50,6 @@ const isValidGenerateResponseArgs = (args: any): args is GenerateResponseArgs =>
   typeof args === 'object' &&
   args !== null &&
   typeof args.prompt === 'string' &&
-  (args.model === undefined || typeof args.model === 'string') &&
   (args.showReasoning === undefined || typeof args.showReasoning === 'boolean') &&
   (args.clearContext === undefined || typeof args.clearContext === 'boolean');
 
@@ -137,11 +137,6 @@ class RatServer {
                 type: 'string',
                 description: 'The user\'s input prompt'
               },
-              model: {
-                type: 'string',
-                description: 'Model to use for response generation (optional)',
-                enum: ['gpt-4', 'claude-3-5-sonnet-20241022', 'mistral']
-              },
               showReasoning: {
                 type: 'boolean',
                 description: 'Whether to include reasoning in response',
@@ -183,11 +178,10 @@ class RatServer {
         // Get DeepSeek reasoning
         const reasoning = await this.getDeepseekReasoning(request.params.arguments.prompt);
         
-        // Get final response using specified model or default
+        // Get final response using configured model
         const response = await this.getFinalResponse(
           request.params.arguments.prompt,
-          reasoning,
-          request.params.arguments.model
+          reasoning
         );
 
         // Add to context after successful response
@@ -196,7 +190,7 @@ class RatServer {
           prompt: request.params.arguments.prompt,
           reasoning,
           response,
-          model: request.params.arguments.model || 'default'
+          model: DEFAULT_MODEL
         });
 
         return {
@@ -251,35 +245,60 @@ class RatServer {
     }
   }
 
-  private async getFinalResponse(prompt: string, reasoning: string, model?: string): Promise<string> {
-    const contextPrompt = this.context.entries.length > 0
-      ? `Previous conversation:\n${this.formatContextForPrompt()}\n\n`
-      : '';
-    
-    const combinedPrompt = `${contextPrompt}Current question: <question>${prompt}</question>\n\n<thinking>${reasoning}</thinking>\n\n`;
-    log('Getting final response with model:', model || 'default');
-    log('Combined prompt:', combinedPrompt);
+  private async getFinalResponse(prompt: string, reasoning: string): Promise<string> {
+    log('Getting final response with model:', DEFAULT_MODEL);
 
     try {
-      if (model?.includes('claude')) {
+      if (DEFAULT_MODEL.includes('claude')) {
         log('Using Claude for response');
-        const response = await this.anthropicClient.messages.create({
-          model: "claude-3-5-sonnet-20241022",
-          max_tokens: 4096,
-          messages: [
+        
+        // Create messages array with proper structure
+        const messages = [
+          // First the user's question
+          {
+            role: "user" as const,
+            content: [
+              {
+                type: "text" as const,
+                text: prompt
+              }
+            ]
+          },
+          // Then the reasoning as assistant's thoughts
+          {
+            role: "assistant" as const,
+            content: [
+              {
+                type: "text" as const,
+                text: `<thinking>${reasoning}</thinking>`
+              }
+            ]
+          }
+        ];
+
+        // If we have context, prepend it as previous turns
+        if (this.context.entries.length > 0) {
+          const contextMessages = this.context.entries.flatMap(entry => [
             {
-              role: "user",
-              content: [
-                {
-                  type: "text",
-                  text: combinedPrompt
-                }
-              ]
+              role: "user" as const,
+              content: [{ type: "text" as const, text: entry.prompt }]
+            },
+            {
+              role: "assistant" as const,
+              content: [{ type: "text" as const, text: entry.response }]
             }
-          ]
+          ]);
+          messages.unshift(...contextMessages);
+        }
+
+        log('Claude messages:', messages);
+
+        const response = await this.anthropicClient.messages.create({
+          model: DEFAULT_MODEL,
+          max_tokens: 4096,
+          messages: messages
         });
         
-        // Handle the response content properly
         const content = response.content[0];
         if (content.type === "text") {
           log('Received Claude response:', content.text);
@@ -288,10 +307,17 @@ class RatServer {
         log('Unexpected Claude response type:', content);
         return "Error: Unexpected response type from Claude";
       } else {
-        // Default to OpenRouter
+        // For non-Claude models, keep the existing format
+        const contextPrompt = this.context.entries.length > 0
+          ? `Previous conversation:\n${this.formatContextForPrompt()}\n\n`
+          : '';
+        
+        const combinedPrompt = `${contextPrompt}Current question: <question>${prompt}</question>\n\n<thinking>${reasoning}</thinking>\n\n`;
         log('Using OpenRouter for response');
+        log('Combined prompt:', combinedPrompt);
+        
         const completion = await this.openrouterClient.chat.completions.create({
-          model: model || "openai/gpt-4",
+          model: OPENROUTER_MODEL,
           messages: [{ role: "user", content: combinedPrompt }]
         });
         const response = completion.choices[0].message.content || "";
