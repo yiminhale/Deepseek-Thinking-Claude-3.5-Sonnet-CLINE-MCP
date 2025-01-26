@@ -2,6 +2,8 @@
 
 A Model Context Protocol (MCP) server that implements RAT's two-stage reasoning process, combining DeepSeek's reasoning capabilities with various response models.
 
+<a href="https://glama.ai/mcp/servers/t0ykwg3k7n"><img width="380" height="200" src="https://glama.ai/mcp/servers/t0ykwg3k7n/badge" alt="RAT Server MCP server" /></a>
+
 ## Features
 
 - **Two-Stage Processing**:
