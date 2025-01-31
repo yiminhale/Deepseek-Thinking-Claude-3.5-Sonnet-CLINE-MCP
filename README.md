@@ -1,31 +1,34 @@
-# RAT MCP Server (Retrieval Augmented Thinking)
+# Deepseek-Thinking-Claude-3.5-Sonnet-CLINE-MCP
 
-A Model Context Protocol (MCP) server that implements RAT's two-stage reasoning process, combining DeepSeek's reasoning capabilities with various response models.
+A Model Context Protocol (MCP) server that combines DeepSeek's reasoning capabilities with Claude 3.5 Sonnet's response generation through Cline. This implementation uses a two-stage process where DeepSeek provides structured reasoning which is then incorporated into Claude's response generation.
 
 ## Features
 
 - **Two-Stage Processing**:
-  - Uses DeepSeek for detailed reasoning and analysis
-  - Supports multiple models for final response generation
+  - Uses DeepSeek for initial reasoning (50k character context)
+  - Uses Claude 3.5 Sonnet for final response (600k character context)
   - Maintains conversation context between interactions
+  - Injects DeepSeek's reasoning as assistant messages in Claude's context
 
-- **Supported Models**:
-  - DeepSeek Reasoner (for thinking process)
-  - Claude 3.5 Sonnet (via Anthropic)
-  - Any OpenRouter model (GPT-4, Gemini, etc.)
-
-- **Context Management**:
-  - Maintains conversation history
-  - Includes previous Q&A in reasoning process
+- **Smart Conversation Management**:
+  - Detects active conversations using file modification times
+  - Handles multiple concurrent conversations
+  - Filters out ended conversations automatically
   - Supports context clearing when needed
-  - Configurable context size limit
+
+- **Optimized Context Handling**:
+  - Model-specific context limits:
+    * DeepSeek: 50,000 characters for focused reasoning
+    * Claude: 600,000 characters for comprehensive responses
+  - Prioritizes recent messages when approaching limits
+  - Maintains conversation flow across multiple interactions
 
 ## Installation
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/newideas99/RAT-retrieval-augmented-thinking-MCP.git
-cd rat-mcp-server
+git clone https://github.com/yourusername/Deepseek-Thinking-Claude-3.5-Sonnet-CLINE-MCP.git
+cd Deepseek-Thinking-Claude-3.5-Sonnet-CLINE-MCP
 ```
 
 2. Install dependencies:
@@ -38,11 +41,11 @@ npm install
 # Required: DeepSeek API key for reasoning stage
 DEEPSEEK_API_KEY=your_deepseek_api_key_here
 
-# Required: OpenRouter API key for non-Claude models
-OPENROUTER_API_KEY=your_openrouter_api_key_here
-
-# Optional: Anthropic API key for Claude model
+# Required: Anthropic API key for Claude model
 ANTHROPIC_API_KEY=your_anthropic_api_key_here
+
+# Optional: OpenRouter API key for alternative models
+OPENROUTER_API_KEY=your_openrouter_api_key_here
 
 # Optional: Model configuration
 DEFAULT_MODEL=claude-3-5-sonnet-20241022  # or any OpenRouter model ID
@@ -63,11 +66,11 @@ Add to your Cline MCP settings (usually in `~/.vscode/globalStorage/saoudrizwan.
   "mcpServers": {
     "rat": {
       "command": "/path/to/node",
-      "args": ["/path/to/rat-mcp-server/build/index.js"],
+      "args": ["/path/to/Deepseek-Thinking-Claude-3.5-Sonnet-CLINE-MCP/build/index.js"],
       "env": {
         "DEEPSEEK_API_KEY": "your_key_here",
-        "OPENROUTER_API_KEY": "your_key_here",
         "ANTHROPIC_API_KEY": "your_key_here",
+        "OPENROUTER_API_KEY": "your_key_here",
         "DEFAULT_MODEL": "claude-3-5-sonnet-20241022",
         "OPENROUTER_MODEL": "openai/gpt-4"
       },
@@ -86,7 +89,8 @@ The server provides a single tool `generate_response` with the following paramet
 {
   "prompt": string,           // Required: The question or prompt
   "showReasoning"?: boolean, // Optional: Show DeepSeek's reasoning process
-  "clearContext"?: boolean   // Optional: Clear conversation history
+  "clearContext"?: boolean,  // Optional: Clear conversation history
+  "includeHistory"?: boolean // Optional: Include Cline conversation history
 }
 ```
 
@@ -97,7 +101,8 @@ use_mcp_tool({
   tool_name: "generate_response",
   arguments: {
     prompt: "What is Python?",
-    showReasoning: true
+    showReasoning: true,
+    includeHistory: true
   }
 });
 ```
@@ -116,3 +121,5 @@ MIT License - See LICENSE file for details.
 ## Credits
 
 Based on the RAT (Retrieval Augmented Thinking) concept by [Skirano](https://x.com/skirano/status/1881922469411643413), which enhances AI responses through structured reasoning and knowledge retrieval.
+
+This implementation specifically combines DeepSeek's reasoning capabilities with Claude 3.5 Sonnet's response generation through the Cline VSCode extension.
