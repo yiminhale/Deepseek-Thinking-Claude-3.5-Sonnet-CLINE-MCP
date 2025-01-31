@@ -8,7 +8,6 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 import { OpenAI } from 'openai';
-import { Anthropic } from '@anthropic-ai/sdk';
 import dotenv from 'dotenv';
 import * as os from 'os';
 import * as path from 'path';
@@ -21,14 +20,13 @@ dotenv.config();
 const DEBUG = true;
 const log = (...args: any[]) => {
   if (DEBUG) {
-    console.error('[RAT MCP]', ...args);
+    console.error('[DEEPSEEK-CLAUDE MCP]', ...args);
   }
 };
 
 // Constants
-const DEEPSEEK_MODEL = "deepseek-reasoner";
-const DEFAULT_MODEL = process.env.DEFAULT_MODEL || "claude-3-5-sonnet-20241022";
-const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "openai/gpt-4";
+const DEEPSEEK_MODEL = "deepseek/deepseek-r1";
+const CLAUDE_MODEL = "anthropic/claude-3.5-sonnet:beta";
 
 interface ConversationEntry {
   timestamp: number;
@@ -162,10 +160,8 @@ function formatHistoryForModel(history: ClaudeMessage[], isDeepSeek: boolean): s
   return formattedMessages.join('\n\n');
 }
 
-class RatServer {
+class DeepseekClaudeServer {
   private server: Server;
-  private deepseekClient: OpenAI;
-  private anthropicClient: Anthropic;
   private openrouterClient: OpenAI;
   private context: ConversationContext = {
     entries: [],
@@ -175,18 +171,7 @@ class RatServer {
   constructor() {
     log('Initializing API clients...');
     
-    // Initialize API clients
-    this.deepseekClient = new OpenAI({
-      apiKey: process.env.DEEPSEEK_API_KEY,
-      baseURL: "https://api.deepseek.com"
-    });
-    log('DeepSeek client initialized');
-
-    this.anthropicClient = new Anthropic({
-      apiKey: process.env.ANTHROPIC_API_KEY,
-    });
-    log('Anthropic client initialized');
-
+    // Initialize OpenRouter client
     this.openrouterClient = new OpenAI({
       baseURL: "https://openrouter.ai/api/v1",
       apiKey: process.env.OPENROUTER_API_KEY
@@ -234,7 +219,7 @@ class RatServer {
       tools: [
         {
           name: 'generate_response',
-          description: 'Generate a response using RAT\'s two-stage reasoning process. Maintains conversation context between calls.',
+          description: 'Generate a response using DeepSeek\'s reasoning and Claude\'s response generation through OpenRouter.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -310,7 +295,7 @@ class RatServer {
           prompt: request.params.arguments.prompt,
           reasoning,
           response,
-          model: DEFAULT_MODEL
+          model: CLAUDE_MODEL
         });
 
         return {
@@ -338,23 +323,25 @@ class RatServer {
       : prompt;
 
     try {
-      const response = await this.deepseekClient.chat.completions.create({
+      // Ask DeepSeek to think but only output 'done'
+      const response = await this.openrouterClient.chat.completions.create({
         model: DEEPSEEK_MODEL,
-        max_tokens: 1,
-        messages: [{ role: "user", content: contextPrompt }],
-        stream: true
-      });
+        messages: [{ 
+          role: "user", 
+          content: `${contextPrompt} Please think this through, but don't output an answer -- only think about the problem, and output 'done'.`
+        }],
+        include_reasoning: true,
+        temperature: 0.7,
+        top_p: 1,
+        repetition_penalty: 1
+      } as any);
 
-      let reasoning = "";
-      for await (const chunk of response) {
-        // DeepSeek's reasoning content comes through as a custom property
-        const delta = chunk.choices[0].delta as any;
-        if (delta.reasoning_content) {
-          reasoning += delta.reasoning_content;
-        }
+      // Get reasoning from response
+      const responseData = response as any;
+      if (!responseData.choices?.[0]?.message?.reasoning) {
+        throw new Error('No reasoning received from DeepSeek');
       }
-
-      return reasoning;
+      return responseData.choices[0].message.reasoning;
     } catch (error) {
       log('Error in getDeepseekReasoning:', error);
       throw error;
@@ -363,71 +350,44 @@ class RatServer {
 
   private async getFinalResponse(prompt: string, reasoning: string): Promise<string> {
     try {
-      if (DEFAULT_MODEL.includes('claude')) {
-        // Create messages array with proper structure
-        const messages = [
-          // First the user's question
+      // Create messages array with proper structure
+      const messages = [
+        // First the user's question
+        {
+          role: "user" as const,
+          content: prompt
+        },
+        // Then the reasoning as assistant's thoughts
+        {
+          role: "assistant" as const,
+          content: `<thinking>${reasoning}</thinking>`
+        }
+      ];
+
+      // If we have context, prepend it as previous turns
+      if (this.context.entries.length > 0) {
+        const contextMessages = this.context.entries.flatMap(entry => [
           {
             role: "user" as const,
-            content: [
-              {
-                type: "text" as const,
-                text: prompt
-              }
-            ]
+            content: entry.prompt
           },
-          // Then the reasoning as assistant's thoughts
           {
             role: "assistant" as const,
-            content: [
-              {
-                type: "text" as const,
-                text: `<thinking>${reasoning}</thinking>`
-              }
-            ]
+            content: entry.response
           }
-        ];
-
-        // If we have context, prepend it as previous turns
-        if (this.context.entries.length > 0) {
-          const contextMessages = this.context.entries.flatMap(entry => [
-            {
-              role: "user" as const,
-              content: [{ type: "text" as const, text: entry.prompt }]
-            },
-            {
-              role: "assistant" as const,
-              content: [{ type: "text" as const, text: entry.response }]
-            }
-          ]);
-          messages.unshift(...contextMessages);
-        }
-
-        const response = await this.anthropicClient.messages.create({
-          model: DEFAULT_MODEL,
-          max_tokens: 4096,
-          messages: messages
-        });
-        
-        const content = response.content[0];
-        if (content.type === "text") {
-          return content.text;
-        }
-        return "Error: Unexpected response type from Claude";
-      } else {
-        // For non-Claude models, keep the existing format
-        const contextPrompt = this.context.entries.length > 0
-          ? `Previous conversation:\n${this.formatContextForPrompt()}\n\n`
-          : '';
-        
-        const combinedPrompt = `${contextPrompt}Current question: <question>${prompt}</question>\n\n<thinking>${reasoning}</thinking>\n\n`;
-        
-        const completion = await this.openrouterClient.chat.completions.create({
-          model: OPENROUTER_MODEL,
-          messages: [{ role: "user", content: combinedPrompt }]
-        });
-        return completion.choices[0].message.content || "";
+        ]);
+        messages.unshift(...contextMessages);
       }
+
+      const response = await this.openrouterClient.chat.completions.create({
+        model: CLAUDE_MODEL,
+        messages: messages,
+        temperature: 0.7,
+        top_p: 1,
+        repetition_penalty: 1
+      } as any);
+      
+      return response.choices[0].message.content || "Error: No response content";
     } catch (error) {
       log('Error in getFinalResponse:', error);
       throw error;
@@ -437,9 +397,9 @@ class RatServer {
   async run() {
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
-    console.error('RAT MCP server running on stdio');
+    console.error('DeepSeek-Claude MCP server running on stdio');
   }
 }
 
-const server = new RatServer();
+const server = new DeepseekClaudeServer();
 server.run().catch(console.error);
