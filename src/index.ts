@@ -8,8 +8,10 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 import { OpenAI } from 'openai';
-import { Anthropic } from '@anthropic-ai/sdk';
 import dotenv from 'dotenv';
+import * as os from 'os';
+import * as path from 'path';
+import * as fs from 'fs/promises';
 
 // Load environment variables
 dotenv.config();
@@ -18,14 +20,13 @@ dotenv.config();
 const DEBUG = true;
 const log = (...args: any[]) => {
   if (DEBUG) {
-    console.error('[RAT MCP]', ...args);
+    console.error('[DEEPSEEK-CLAUDE MCP]', ...args);
   }
 };
 
 // Constants
-const DEEPSEEK_MODEL = "deepseek-reasoner";
-const DEFAULT_MODEL = process.env.DEFAULT_MODEL || "claude-3-5-sonnet-20241022";
-const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "openai/gpt-4";
+const DEEPSEEK_MODEL = "deepseek/deepseek-r1";
+const CLAUDE_MODEL = "anthropic/claude-3.5-sonnet:beta";
 
 interface ConversationEntry {
   timestamp: number;
@@ -44,6 +45,21 @@ interface GenerateResponseArgs {
   prompt: string;
   showReasoning?: boolean;
   clearContext?: boolean;
+  includeHistory?: boolean;
+}
+
+interface ClaudeMessage {
+  role: 'user' | 'assistant';
+  content: string | { type: string; text: string }[];
+}
+
+interface UiMessage {
+  ts: number;
+  type: string;
+  say?: string;
+  ask?: string;
+  text: string;
+  conversationHistoryIndex: number;
 }
 
 const isValidGenerateResponseArgs = (args: any): args is GenerateResponseArgs =>
@@ -51,12 +67,101 @@ const isValidGenerateResponseArgs = (args: any): args is GenerateResponseArgs =>
   args !== null &&
   typeof args.prompt === 'string' &&
   (args.showReasoning === undefined || typeof args.showReasoning === 'boolean') &&
-  (args.clearContext === undefined || typeof args.clearContext === 'boolean');
+  (args.clearContext === undefined || typeof args.clearContext === 'boolean') &&
+  (args.includeHistory === undefined || typeof args.includeHistory === 'boolean');
 
-class RatServer {
+function getClaudePath(): string {
+  const homeDir = os.homedir();
+  switch (process.platform) {
+    case 'win32':
+      return path.join(homeDir, 'AppData', 'Roaming', 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'tasks');
+    case 'darwin':
+      return path.join(homeDir, 'Library', 'Application Support', 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'tasks');
+    default: // linux
+      return path.join(homeDir, '.config', 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'tasks');
+  }
+}
+
+async function findActiveConversation(): Promise<ClaudeMessage[] | null> {
+  try {
+    const tasksPath = getClaudePath();
+    const dirs = await fs.readdir(tasksPath);
+    
+    // Get modification time for each api_conversation_history.json
+    const dirStats = await Promise.all(
+      dirs.map(async (dir) => {
+        try {
+          const historyPath = path.join(tasksPath, dir, 'api_conversation_history.json');
+          const stats = await fs.stat(historyPath);
+          const uiPath = path.join(tasksPath, dir, 'ui_messages.json');
+          const uiContent = await fs.readFile(uiPath, 'utf8');
+          const uiMessages: UiMessage[] = JSON.parse(uiContent);
+          const hasEnded = uiMessages.some(m => m.type === 'conversation_ended');
+          
+          return {
+            dir,
+            mtime: stats.mtime.getTime(),
+            hasEnded
+          };
+        } catch (error) {
+          log('Error checking folder:', dir, error);
+          return null;
+        }
+      })
+    );
+
+    // Filter out errors and ended conversations, then sort by modification time
+    const sortedDirs = dirStats
+      .filter((stat): stat is NonNullable<typeof stat> => 
+        stat !== null && !stat.hasEnded
+      )
+      .sort((a, b) => b.mtime - a.mtime);
+
+    // Use most recently modified active conversation
+    const latest = sortedDirs[0]?.dir;
+    if (!latest) {
+      log('No active conversations found');
+      return null;
+    }
+    
+    const historyPath = path.join(tasksPath, latest, 'api_conversation_history.json');
+    const history = await fs.readFile(historyPath, 'utf8');
+    return JSON.parse(history);
+  } catch (error) {
+    log('Error finding active conversation:', error);
+    return null;
+  }
+}
+
+function formatHistoryForModel(history: ClaudeMessage[], isDeepSeek: boolean): string {
+  let totalLength = 0;
+  const maxLength = isDeepSeek ? 50000 : 600000; // 50k chars for DeepSeek, 600k for Claude
+  const formattedMessages = [];
+  
+  // Process messages from most recent to oldest
+  for (let i = history.length - 1; i >= 0; i--) {
+    const msg = history[i];
+    const content = Array.isArray(msg.content)
+      ? msg.content.map(c => c.text).join('\n')
+      : msg.content;
+    
+    const formattedMsg = `${msg.role === 'user' ? 'Human' : 'Assistant'}: ${content}`;
+    const msgLength = formattedMsg.length;
+    
+    // Stop adding messages if we'd exceed the limit
+    if (totalLength + msgLength > maxLength) {
+      break;
+    }
+    
+    formattedMessages.unshift(formattedMsg); // Add to start to maintain order
+    totalLength += msgLength;
+  }
+  
+  return formattedMessages.join('\n\n');
+}
+
+class DeepseekClaudeServer {
   private server: Server;
-  private deepseekClient: OpenAI;
-  private anthropicClient: Anthropic;
   private openrouterClient: OpenAI;
   private context: ConversationContext = {
     entries: [],
@@ -66,18 +171,7 @@ class RatServer {
   constructor() {
     log('Initializing API clients...');
     
-    // Initialize API clients
-    this.deepseekClient = new OpenAI({
-      apiKey: process.env.DEEPSEEK_API_KEY,
-      baseURL: "https://api.deepseek.com"
-    });
-    log('DeepSeek client initialized');
-
-    this.anthropicClient = new Anthropic({
-      apiKey: process.env.ANTHROPIC_API_KEY,
-    });
-    log('Anthropic client initialized');
-
+    // Initialize OpenRouter client
     this.openrouterClient = new OpenAI({
       baseURL: "https://openrouter.ai/api/v1",
       apiKey: process.env.OPENROUTER_API_KEY
@@ -87,7 +181,7 @@ class RatServer {
     // Initialize MCP server
     this.server = new Server(
       {
-        name: 'rat-server',
+        name: 'deepseek-thinking-claude-mcp',
         version: '0.1.0',
       },
       {
@@ -112,10 +206,6 @@ class RatServer {
     if (this.context.entries.length > this.context.maxEntries) {
       this.context.entries.shift();  // Remove oldest
     }
-    log('Context updated:', {
-      entriesCount: this.context.entries.length,
-      latestEntry: this.context.entries[this.context.entries.length - 1]
-    });
   }
 
   private formatContextForPrompt(): string {
@@ -129,7 +219,7 @@ class RatServer {
       tools: [
         {
           name: 'generate_response',
-          description: 'Generate a response using RAT\'s two-stage reasoning process. Maintains conversation context between calls.',
+          description: 'Generate a response using DeepSeek\'s reasoning and Claude\'s response generation through OpenRouter.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -146,6 +236,11 @@ class RatServer {
                 type: 'boolean',
                 description: 'Clear conversation history before this request',
                 default: false
+              },
+              includeHistory: {
+                type: 'boolean',
+                description: 'Include Cline conversation history for context',
+                default: true
               }
             },
             required: ['prompt']
@@ -172,17 +267,27 @@ class RatServer {
       try {
         if (request.params.arguments.clearContext) {
           this.context.entries = [];
-          log('Context cleared');
         }
 
-        // Get DeepSeek reasoning
-        const reasoning = await this.getDeepseekReasoning(request.params.arguments.prompt);
+        // Get Cline conversation history if requested
+        let history: ClaudeMessage[] | null = null;
+        if (request.params.arguments.includeHistory !== false) {
+          history = await findActiveConversation();
+        }
+
+        // Get DeepSeek reasoning with limited history
+        const reasoningHistory = history ? formatHistoryForModel(history, true) : '';
+        const reasoningPrompt = reasoningHistory 
+          ? `${reasoningHistory}\n\nNew question: ${request.params.arguments.prompt}`
+          : request.params.arguments.prompt;
+        const reasoning = await this.getDeepseekReasoning(reasoningPrompt);
         
-        // Get final response using configured model
-        const response = await this.getFinalResponse(
-          request.params.arguments.prompt,
-          reasoning
-        );
+        // Get final response with full history
+        const responseHistory = history ? formatHistoryForModel(history, false) : '';
+        const fullPrompt = responseHistory 
+          ? `${responseHistory}\n\nCurrent task: ${request.params.arguments.prompt}`
+          : request.params.arguments.prompt;
+        const response = await this.getFinalResponse(fullPrompt, reasoning);
 
         // Add to context after successful response
         this.addToContext({
@@ -190,7 +295,7 @@ class RatServer {
           prompt: request.params.arguments.prompt,
           reasoning,
           response,
-          model: DEFAULT_MODEL
+          model: CLAUDE_MODEL
         });
 
         return {
@@ -217,28 +322,26 @@ class RatServer {
       ? `Previous conversation:\n${this.formatContextForPrompt()}\n\nNew question: ${prompt}`
       : prompt;
 
-    log('Getting DeepSeek reasoning for prompt:', contextPrompt);
     try {
-      const response = await this.deepseekClient.chat.completions.create({
+      // Ask DeepSeek to think but only output 'done'
+      const response = await this.openrouterClient.chat.completions.create({
         model: DEEPSEEK_MODEL,
-        max_tokens: 1,
-        messages: [{ role: "user", content: contextPrompt }],
-        stream: true
-      });
-      log('DeepSeek stream created successfully');
+        messages: [{ 
+          role: "user", 
+          content: `${contextPrompt} Please think this through, but don't output an answer -- only think about the problem, and output 'done'.`
+        }],
+        include_reasoning: true,
+        temperature: 0.7,
+        top_p: 1,
+        repetition_penalty: 1
+      } as any);
 
-      let reasoning = "";
-      for await (const chunk of response) {
-        // DeepSeek's reasoning content comes through as a custom property
-        const delta = chunk.choices[0].delta as any;
-        if (delta.reasoning_content) {
-          reasoning += delta.reasoning_content;
-          log('Received reasoning chunk:', delta.reasoning_content);
-        }
+      // Get reasoning from response
+      const responseData = response as any;
+      if (!responseData.choices?.[0]?.message?.reasoning) {
+        throw new Error('No reasoning received from DeepSeek');
       }
-
-      log('Completed reasoning:', reasoning);
-      return reasoning;
+      return responseData.choices[0].message.reasoning;
     } catch (error) {
       log('Error in getDeepseekReasoning:', error);
       throw error;
@@ -246,84 +349,45 @@ class RatServer {
   }
 
   private async getFinalResponse(prompt: string, reasoning: string): Promise<string> {
-    log('Getting final response with model:', DEFAULT_MODEL);
-
     try {
-      if (DEFAULT_MODEL.includes('claude')) {
-        log('Using Claude for response');
-        
-        // Create messages array with proper structure
-        const messages = [
-          // First the user's question
+      // Create messages array with proper structure
+      const messages = [
+        // First the user's question
+        {
+          role: "user" as const,
+          content: prompt
+        },
+        // Then the reasoning as assistant's thoughts
+        {
+          role: "assistant" as const,
+          content: `<thinking>${reasoning}</thinking>`
+        }
+      ];
+
+      // If we have context, prepend it as previous turns
+      if (this.context.entries.length > 0) {
+        const contextMessages = this.context.entries.flatMap(entry => [
           {
             role: "user" as const,
-            content: [
-              {
-                type: "text" as const,
-                text: prompt
-              }
-            ]
+            content: entry.prompt
           },
-          // Then the reasoning as assistant's thoughts
           {
             role: "assistant" as const,
-            content: [
-              {
-                type: "text" as const,
-                text: `<thinking>${reasoning}</thinking>`
-              }
-            ]
+            content: entry.response
           }
-        ];
-
-        // If we have context, prepend it as previous turns
-        if (this.context.entries.length > 0) {
-          const contextMessages = this.context.entries.flatMap(entry => [
-            {
-              role: "user" as const,
-              content: [{ type: "text" as const, text: entry.prompt }]
-            },
-            {
-              role: "assistant" as const,
-              content: [{ type: "text" as const, text: entry.response }]
-            }
-          ]);
-          messages.unshift(...contextMessages);
-        }
-
-        log('Claude messages:', messages);
-
-        const response = await this.anthropicClient.messages.create({
-          model: DEFAULT_MODEL,
-          max_tokens: 4096,
-          messages: messages
-        });
-        
-        const content = response.content[0];
-        if (content.type === "text") {
-          log('Received Claude response:', content.text);
-          return content.text;
-        }
-        log('Unexpected Claude response type:', content);
-        return "Error: Unexpected response type from Claude";
-      } else {
-        // For non-Claude models, keep the existing format
-        const contextPrompt = this.context.entries.length > 0
-          ? `Previous conversation:\n${this.formatContextForPrompt()}\n\n`
-          : '';
-        
-        const combinedPrompt = `${contextPrompt}Current question: <question>${prompt}</question>\n\n<thinking>${reasoning}</thinking>\n\n`;
-        log('Using OpenRouter for response');
-        log('Combined prompt:', combinedPrompt);
-        
-        const completion = await this.openrouterClient.chat.completions.create({
-          model: OPENROUTER_MODEL,
-          messages: [{ role: "user", content: combinedPrompt }]
-        });
-        const response = completion.choices[0].message.content || "";
-        log('Received OpenRouter response:', response);
-        return response;
+        ]);
+        messages.unshift(...contextMessages);
       }
+
+      const response = await this.openrouterClient.chat.completions.create({
+        model: CLAUDE_MODEL,
+        messages: messages,
+        temperature: 0.7,
+        top_p: 1,
+        repetition_penalty: 1
+      } as any);
+      
+      return response.choices[0].message.content || "Error: No response content";
     } catch (error) {
       log('Error in getFinalResponse:', error);
       throw error;
@@ -333,9 +397,9 @@ class RatServer {
   async run() {
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
-    console.error('RAT MCP server running on stdio');
+    console.error('DeepSeek-Claude MCP server running on stdio');
   }
 }
 
-const server = new RatServer();
+const server = new DeepseekClaudeServer();
 server.run().catch(console.error);
