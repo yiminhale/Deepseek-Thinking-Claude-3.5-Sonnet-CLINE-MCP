@@ -1,5 +1,7 @@
 # Deepseek-Thinking-Claude-3.5-Sonnet-CLINE-MCP
 
+[![smithery badge](https://smithery.ai/badge/@newideas99/Deepseek-Thinking-Claude-3.5-Sonnet-CLINE-MCP)](https://smithery.ai/server/@newideas99/Deepseek-Thinking-Claude-3.5-Sonnet-CLINE-MCP)
+
 A Model Context Protocol (MCP) server that combines DeepSeek R1's reasoning capabilities with Claude 3.5 Sonnet's response generation through OpenRouter. This implementation uses a two-stage process where DeepSeek provides structured reasoning which is then incorporated into Claude's response generation.
 
 ## Features
@@ -27,6 +29,15 @@ A Model Context Protocol (MCP) server that combines DeepSeek R1's reasoning capa
 
 ## Installation
 
+### Installing via Smithery
+
+To install DeepSeek Thinking with Claude 3.5 Sonnet for Claude Desktop automatically via [Smithery](https://smithery.ai/server/@newideas99/Deepseek-Thinking-Claude-3.5-Sonnet-CLINE-MCP):
+
+```bash
+npx -y @smithery/cli install @newideas99/Deepseek-Thinking-Claude-3.5-Sonnet-CLINE-MCP --client claude
+```
+
+### Manual Installation
 1. Clone the repository:
 ```bash
 git clone https://github.com/yourusername/Deepseek-Thinking-Claude-3.5-Sonnet-CLINE-MCP.git
